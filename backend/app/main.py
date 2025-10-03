@@ -7,7 +7,8 @@ from PIL import Image
 import numpy as np
 import cv2
 import mediapipe as mp
-from model_utils import ModelManager  # ← CORREGIDO: con punto
+from app.model_utils import ModelManager
+ # ← CORREGIDO: con punto
 import logging
 import os
 
