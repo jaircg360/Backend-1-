@@ -7,10 +7,10 @@ from PIL import Image
 import numpy as np
 import cv2
 import mediapipe as mp
-from app.model_utils import ModelManager
- # ← CORREGIDO: con punto
 import logging
 import os
+import json
+from datetime import datetime
 
 # Configurar logging
 logging.basicConfig(level=logging.INFO)
@@ -24,6 +24,8 @@ def read_root():
     return {
         "message": "Hand Gesture Recognition API", 
         "version": "1.0.0",
+        "status": "healthy",
+        "timestamp": datetime.now().isoformat(),
         "endpoints": {
             "upload_sample": "/api/upload_sample (POST)",
             "train": "/api/train (POST)", 
@@ -32,21 +34,89 @@ def read_root():
             "samples_info": "/api/samples (GET)",
             "delete_model": "/api/model/{model_name} (DELETE)",
             "clear_samples": "/api/clear_samples (DELETE)",
+            "health": "/health (GET)",
             "docs": "/docs"
         }
     }
 
+# Configuración CORS mejorada para producción con tu dominio de Vercel
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000", "*"],
+    allow_origins=[
+        "https://frontend-1-hwfx.vercel.app",
+        "http://localhost:3000",
+        "http://127.0.0.1:3000"
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
+# Health check endpoint
+@app.get("/health")
+def health_check():
+    return {
+        "status": "healthy", 
+        "timestamp": datetime.now().isoformat(),
+        "service": "Hand Gesture Recognition API",
+        "samples_in_memory": len(COLLECTED)
+    }
+
 mp_hands = mp.solutions.hands
+
+# Intento de importación flexible para ModelManager
+try:
+    from model_utils import ModelManager
+    logger.info("ModelManager importado correctamente")
+except ImportError:
+    try:
+        from .model_utils import ModelManager
+        logger.info("ModelManager importado con importación relativa")
+    except ImportError as e:
+        logger.error(f"Error importando ModelManager: {e}")
+        # Crear una clase dummy para evitar errores
+        class ModelManager:
+            def __init__(self):
+                self.models = {}
+            def train_and_save(self, X, y, name):
+                return {"accuracy": 0.0, "n_samples": len(X), "classification_report": {}, "classes": list(set(y))}
+            def list_models(self):
+                return []
+            def get_model_info(self, model_name):
+                return None
+            def predict_with_confidence(self, landmarks, model_name):
+                return {"prediction": "unknown", "confidence": 0.0, "probabilities": {}, "all_predictions": []}
+            def delete_model(self, model_name):
+                return []
+
 manager = ModelManager()
-COLLECTED = []  # in-memory list of (landmarks, label)
+
+# Sistema de persistencia básico para COLLECTED
+def load_collected():
+    """Cargar muestras desde archivo JSON"""
+    try:
+        if os.path.exists('collected_data.json'):
+            with open('collected_data.json', 'r') as f:
+                data = json.load(f)
+                # Convertir de nuevo a lista de tuplas
+                return [(item[0], item[1]) for item in data]
+    except Exception as e:
+        logger.error(f"Error cargando datos: {e}")
+    return []
+
+def save_collected(data):
+    """Guardar muestras en archivo JSON"""
+    try:
+        # Convertir a lista de listas para JSON
+        json_data = [[item[0], item[1]] for item in data]
+        with open('collected_data.json', 'w') as f:
+            json.dump(json_data, f)
+    except Exception as e:
+        logger.error(f"Error guardando datos: {e}")
+
+# Inicializar COLLECTED con datos persistentes
+COLLECTED = load_collected()
+logger.info(f"Cargadas {len(COLLECTED)} muestras desde persistencia")
 
 def extract_landmarks_from_image_bytes(image_bytes) -> list:
     try:
@@ -96,6 +166,9 @@ async def upload_sample(label: str = Form(...), file: UploadFile = File(...)):
             raise HTTPException(status_code=400, detail='No hand detected or low confidence')
         
         COLLECTED.append((lm, label))
+        # Guardar en persistencia
+        save_collected(COLLECTED)
+        
         logger.info(f"Sample uploaded for label '{label}'. Total samples: {len(COLLECTED)}")
         
         return JSONResponse(
@@ -161,7 +234,6 @@ async def list_models():
 @app.get('/api/model/{model_name}')
 async def get_model_details(model_name: str):
     try:
-        
         info = manager.get_model_info(model_name)
         if not info:
             raise HTTPException(status_code=404, detail='Model not found')
@@ -242,6 +314,8 @@ async def clear_samples():
     global COLLECTED
     count = len(COLLECTED)
     COLLECTED = []
+    # Limpiar también la persistencia
+    save_collected(COLLECTED)
     logger.info(f"Cleared {count} samples")
     
     return JSONResponse(
@@ -254,4 +328,5 @@ async def clear_samples():
 
 # Para ejecutar directamente
 if __name__ == "__main__":
-    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
+    port = int(os.environ.get("PORT", 8000))
+    uvicorn.run("main:app", host="0.0.0.0", port=port, reload=False)
